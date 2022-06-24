@@ -32,7 +32,7 @@ export class Mobster {
     }
 
     get driver() {
-        if (this.amIHost) {
+        if (this.isHost) {
             return this.members[this.memberIndex];
         } else {
             return this.driverUser;
@@ -47,7 +47,7 @@ export class Mobster {
         return this.liveshare?.session.user;
     }
 
-    get amIHost() {
+    get isHost() {
         return !!this.hostService;
     };
 
@@ -67,6 +67,17 @@ export class Mobster {
 
         this.liveshare?.onDidChangeSession((event) => {
             console.log('onDidChangeSession', event);
+            if (event.session.access === vsls.Access.None) {
+                console.log('reset session');
+                this.resetSession();
+            } else {
+                console.log('register host/guest');
+                if (event.session.role === vsls.Role.Host) {
+                    this.registerHost();
+                } else if (event.session.role === vsls.Role.Guest) {
+                    this.registerGuest();
+                }
+            }
         });
 
         this.liveshare?.onPresenceProviderRegistered((event) => {
@@ -74,7 +85,24 @@ export class Mobster {
         });
 
         this.liveshare?.onDidChangePeers((event) => {
-            console.log('onDidChangePeers', event);
+            console.log('onDidChangePeers', event, this.liveshare?.peers);
+            if (this.isHost) {
+                event.added.forEach(element => {
+                    if (element.user !== null) {
+                        this.members.push();
+                    }
+                });
+
+                this.members = this.members.filter((member) => {
+                    const removedMember = event.removed.find((element) => {
+                        return member.id === element.user?.id;
+                    });
+                    const isNotRemovedMember = (removedMember === undefined);
+                    return isNotRemovedMember;
+                });
+            }
+
+            console.log('Current Members', this.members);
         });
 
         if (this.liveshare?.onActivity) {
@@ -83,6 +111,20 @@ export class Mobster {
             });
         }
     }
+
+    askStart = () => {
+        vscode.window.showInformationMessage(
+            "Do you want to start the mob timer?",
+            { modal: false },
+            { title: "Start", isCloseAffordance: false },
+            { title: "Cancel", isCloseAffordance: true }
+        ).then((value) => {
+            if (value?.title === 'Start') {
+                console.log('confirmed start the timer', value);
+                this.start();
+            }
+        });
+    };
 
     start = async () => {
         console.log('start');
@@ -94,12 +136,6 @@ export class Mobster {
 
         if (!this.liveshare) { return; }
         if (!this.liveshare.session) { return; }
-
-        if (this.liveshare?.session.role === vsls.Role.Host) {
-            this.registerHost();
-        } else if (this.liveshare?.session.role === vsls.Role.Guest) {
-            this.registerGuest();
-        }
 
         this.nextTurn();
     };
@@ -119,8 +155,8 @@ export class Mobster {
         const currentMember = this.members[this.memberIndex];
         console.log('This turn is', currentMember);
 
-        if (this.amIHost) {
-            this.onCmdTurnChange({driver: currentMember});
+        if (this.isHost) {
+            this.onCmdTurnChange({ driver: currentMember });
         }
 
         this.notify(Command.cmdTurnChange, { driver: currentMember });
@@ -135,7 +171,7 @@ export class Mobster {
     };
 
     confirmDriver = () => {
-        if(!this.me) { return; };
+        if (!this.me) { return; };
 
         this.startTime = dayjs();
         this.currentTimer = setInterval(this.tick, 1000);
@@ -162,7 +198,7 @@ export class Mobster {
                 { title: "Continue", isCloseAffordance: false },
                 { title: "Cancel", isCloseAffordance: true }
             ).then((value) => {
-                if(value?.title === 'Continue') {
+                if (value?.title === 'Continue') {
                     console.log('confirm driver', value);
                     this.confirmDriver();
                 }
@@ -172,7 +208,15 @@ export class Mobster {
         }
     };
 
-    onCmdStartTimer  = (arg: any) => {
+    reCreateMember = () => {
+        if (this.liveshare && this.liveshare?.session.user) {
+            const user = [this.liveshare?.session.user];
+            const peerUsers = this.liveshare?.peers.map((peer) => peer.user).filter(Boolean);
+            this.members = user + peerUsers;
+        }
+    };
+
+    onCmdStartTimer = (arg: any) => {
         const option = arg as Option;
 
         this.startTime = option.startTime;
@@ -195,7 +239,7 @@ export class Mobster {
                 clearInterval(this.currentTimer);
             }
 
-            if (this.amIHost) {
+            if (this.isHost) {
                 this.nextTurn();
             }
         }
@@ -207,15 +251,8 @@ export class Mobster {
         this.hostService?.onNotify(Command.cmdTurnChange, this.onCmdTurnChange);
         this.hostService?.onNotify(Command.cmdStartTimer, this.onCmdStartTimer);
 
-        this.hostService?.onRequest(Command.cmdAddMember, (args) => {
-            console.log('cmdAddMember', args);
-            this.members.push(args[0]);
-        });
-
         if (this.me) {
             this.members.push(this.me);
-            // Start the first turn
-            this.nextTurn();
         }
     };
 
@@ -224,12 +261,15 @@ export class Mobster {
         if (this.guestService?.isServiceAvailable) {
             this.guestService?.onNotify(Command.cmdStartTimer, this.onCmdStartTimer);
             this.guestService?.onNotify(Command.cmdTurnChange, this.onCmdTurnChange);
-
-            // Register me
-            this.guestService.request(Command.cmdAddMember, [this.me]);
         } else {
             // たぶんホストに拡張が入っていない場合
             console.log('Guest service is not available');
         }
+    };
+
+    resetSession = () => {
+        this.hostService = undefined;
+        this.guestService = undefined;
+        this.members = [];
     };
 }
