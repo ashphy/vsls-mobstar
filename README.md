@@ -68,3 +68,17 @@ Ensure that you've read through the extensions guidelines and follow the best pr
 * [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
 
 **Enjoy!**
+
+## Development
+
+```mermaid
+  graph TD;
+      Idle --> |activate|Activated;
+      Activated --> |askStart|WaitStart;
+      WaitStart --> |stopTimer|Activated;
+      WaitStart --> |nextTurn|WaitDriver;
+      WaitDriver --> |confirmDriver|TimerStarted;
+      WaitDriver --> |cancelDriver|WaitDriver;
+      TimerStarted --> |nextTurn|WaitDriver;
+      TimerStarted --> |stopTimer|Activated;
+```

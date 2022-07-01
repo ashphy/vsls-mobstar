@@ -4,10 +4,11 @@ import * as vsls from 'vsls';
 import { Command } from './command';
 import { Option } from './option';
 import { UserInfo } from "vsls";
+import StateMachine = require('javascript-state-machine');
+import { filterNonNullOrUndefined } from './utils/collections';
 
 export class Mobster {
     statusBarItem: vscode.StatusBarItem;
-
     extensionId = 'vsls-mobster';
 
     readonly SERVICE_NAME = 'mobtimer';
@@ -16,38 +17,30 @@ export class Mobster {
     hostService: vsls.SharedService | null | undefined = null;
     guestService: vsls.SharedServiceProxy | null | undefined = null;
 
-    currentTimer: NodeJS.Timeout | null = null;
+    currentTimer: NodeJS.Timeout | undefined = undefined;
 
     // Host manage data
-    members: UserInfo[] = [];
     memberIndex: number = -1;
-    mobTimeIntervalSec = 10;
-    startTime?: dayjs.Dayjs;
 
-    // Guest manage data
-    driverUser: UserInfo | undefined = undefined;
+    option: Option = {
+        state: 'Activated',
+        members: [],
+        mobTimeIntervalSec: 10
+    };
 
     constructor() {
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, Number.MIN_SAFE_INTEGER);
     }
 
-    get driver() {
-        if (this.isHost) {
-            return this.members[this.memberIndex];
-        } else {
-            return this.driverUser;
-        }
-    };
-
     get isDriver() {
-        return this.isMe(this.driver);
+        return this.isMe(this.option.driver);
     }
 
     get me() {
         return this.liveshare?.session.user;
     }
 
-    get isHost() {
+    get isMobTimerHost() {
         return !!this.hostService;
     };
 
@@ -55,9 +48,50 @@ export class Mobster {
         return this.me?.id === user?.id;
     };
 
-    async activate() {
-        console.log('activate!');
+    // State Transition
+    doActivate = () => {
+        this.activateExtention();
 
+        console.log('Activated');
+        this.option.state = 'Activated';
+        this.sync();
+    };
+
+    doAskStart = () => {
+        if (!this.liveshare) { return; }
+        if (!this.liveshare.session) { return; }
+
+        this.askStart();
+
+        console.log('WaitStart');
+        this.option.state = 'WaitStart';
+        this.sync();
+    };
+
+    doNextTurn = () => {
+        this.nextTurn();
+
+        console.log('WaitDriver');
+        this.option.state = 'WaitDriver';
+        this.sync();
+    };
+
+    doConfirmDriver = () => {
+        this.startTimer();
+
+        console.log('TimerStarted');
+        this.option.state = 'TimerStarted';
+        this.sync();
+    };
+
+    doStopTimer = () => {
+        console.log('Activated');
+        this.option.state = 'Activated';
+        this.sync();
+    };
+    // ----- State Transition
+
+    async activateExtention() {
         this.statusBarItem.show();
         this.statusBarItem.text = "Mobstar";
         this.statusBarItem.command = "vsls-mobster.openMobStar";
@@ -86,23 +120,10 @@ export class Mobster {
 
         this.liveshare?.onDidChangePeers((event) => {
             console.log('onDidChangePeers', event, this.liveshare?.peers);
-            if (this.isHost) {
-                event.added.forEach(element => {
-                    if (element.user !== null) {
-                        this.members.push();
-                    }
-                });
-
-                this.members = this.members.filter((member) => {
-                    const removedMember = event.removed.find((element) => {
-                        return member.id === element.user?.id;
-                    });
-                    const isNotRemovedMember = (removedMember === undefined);
-                    return isNotRemovedMember;
-                });
+            if (this.isMobTimerHost) {
+                this.reCreateMember();
             }
-
-            console.log('Current Members', this.members);
+            console.log('Current Members', this.option.members);
         });
 
         if (this.liveshare?.onActivity) {
@@ -119,25 +140,16 @@ export class Mobster {
             { title: "Start", isCloseAffordance: false },
             { title: "Cancel", isCloseAffordance: true }
         ).then((value) => {
-            if (value?.title === 'Start') {
-                console.log('confirmed start the timer', value);
-                this.start();
+            switch (value?.title) {
+                case 'Start':
+                    console.log('confirmed start the timer', value);
+                    this.doNextTurn();
+                    break;
+                case 'Cancel':
+                    this.doStopTimer();
+                    break;
             }
         });
-    };
-
-    start = async () => {
-        console.log('start');
-
-        console.log('api', this.liveshare);
-        console.log('peer', this.liveshare?.peers);
-        console.log('presenceProviders', this.liveshare?.presenceProviders);
-        console.log('session', this.liveshare?.session);
-
-        if (!this.liveshare) { return; }
-        if (!this.liveshare.session) { return; }
-
-        this.nextTurn();
     };
 
     nextTurn = () => {
@@ -148,49 +160,20 @@ export class Mobster {
             this.memberIndex = 0;
         }
 
-        if (this.members.length <= this.memberIndex) {
+        if (this.option.members.length <= this.memberIndex) {
             this.memberIndex = 0;
         }
 
-        const currentMember = this.members[this.memberIndex];
-        console.log('This turn is', currentMember);
+        this.option.driver = this.option.members[this.memberIndex];
+        console.log('This turn is', this.option.driver);
 
-        if (this.isHost) {
-            this.onCmdTurnChange({ driver: currentMember });
-        }
-
-        this.notify(Command.cmdTurnChange, { driver: currentMember });
+        this.confirmingDriver();
     };
 
-    notify = (cmd: string, args: any) => {
-        if (this.hostService) {
-            this.hostService.notify(cmd, args);
-        } else if (this.guestService) {
-            this.guestService.notify(cmd, args);
-        }
-    };
-
-    confirmDriver = () => {
-        if (!this.me) { return; };
-
-        this.startTime = dayjs();
-        this.currentTimer = setInterval(this.tick, 1000);
-        const option: Option = {
-            driver: this.me,
-            startTime: dayjs(),
-            mobTimeIntervalSec: this.mobTimeIntervalSec
-        };
-        this.notify(Command.cmdStartTimer, option);
-    };
-
-    onCmdTurnChange = (args: any) => {
-        console.log('onCmdTurnChange', args.driver);
+    confirmingDriver = () => {
         this.statusBarItem.text = `🛞 Waiting driver` ?? 'NULL';
 
-        const driver = args.driver as UserInfo;
-        this.driverUser = driver;
-
-        if (this.isMe(driver)) {
+        if (this.isMe(this.option.driver)) {
             this.statusBarItem.backgroundColor = '#d68111';
             vscode.window.showInformationMessage(
                 "Next Driver is you!",
@@ -199,8 +182,12 @@ export class Mobster {
                 { title: "Cancel", isCloseAffordance: true }
             ).then((value) => {
                 if (value?.title === 'Continue') {
-                    console.log('confirm driver', value);
-                    this.confirmDriver();
+                    if (this.isMobTimerHost) {
+                        console.log('confirm driver', value);
+                        this.doConfirmDriver();
+                    } else {
+                        this.notify('doConfirmDriver', {});
+                    }
                 }
             });
         } else {
@@ -208,59 +195,89 @@ export class Mobster {
         }
     };
 
-    reCreateMember = () => {
-        if (this.liveshare && this.liveshare?.session.user) {
-            const user = [this.liveshare?.session.user];
-            const peerUsers = this.liveshare?.peers.map((peer) => peer.user).filter(Boolean);
-            this.members = user + peerUsers;
+    startTimer = () => {
+        if (!this.me) { return; };
+
+        this.option.startTime = dayjs();
+        this.syncTimer();
+    };
+
+    syncTimer = () => {
+        if (this.currentTimer === undefined){
+            this.currentTimer = setInterval(this.tick, 1000);
+            this.statusBarItem.text = `🛞 ${this.option.driver?.displayName} ${this.option.mobTimeIntervalSec}s` ?? 'NULL';
         }
     };
 
-    onCmdStartTimer = (arg: any) => {
-        const option = arg as Option;
+    reCreateMember = () => {
+        if (this.liveshare && this.liveshare?.session.user) {
+            const user = this.liveshare?.session.user;
+            const peerUsers = this.liveshare?.peers.map((peer) => peer.user).filter(Boolean);
+            this.option.members = [user].concat(filterNonNullOrUndefined(peerUsers));
+        }
 
-        this.startTime = option.startTime;
-        this.mobTimeIntervalSec = option.mobTimeIntervalSec;
-        this.driverUser = option.driver;
-        this.currentTimer = setInterval(this.tick, 1000);
-
-        this.statusBarItem.text = `🛞 ${this.driver?.displayName} ${this.mobTimeIntervalSec}s` ?? 'NULL';
+        this.sync();
     };
 
     tick = async () => {
         // Display Timer
-        const diff = dayjs().diff(this.startTime, "second");
-        const remeins = this.mobTimeIntervalSec - diff;
-        this.statusBarItem.text = `🛞 ${this.driver?.displayName} ${remeins.toString()}s` ?? 'NULL';
+        const diff = dayjs().diff(this.option.startTime, "second");
+        const remeins = this.option.mobTimeIntervalSec - diff;
+        this.statusBarItem.text = `🛞 ${this.option.driver?.displayName} ${remeins.toString()}s` ?? 'NULL';
 
         // When turn change
         if (remeins <= 0) {
-            if (this.currentTimer !== null) {
+            if (this.currentTimer !== undefined) {
                 clearInterval(this.currentTimer);
+                this.currentTimer = undefined;
             }
 
-            if (this.isHost) {
-                this.nextTurn();
+            if (this.isMobTimerHost) {
+                this.doNextTurn();
+            }
+        }
+    };
+
+    sync = () => {
+        this.notify('sync', this.option);
+    };
+
+    onSync = (args: unknown) => {
+        const oldOption = this.option;
+        const newOption = args as Option;
+
+        console.log('onSync', newOption);
+
+        const isStateChanged = oldOption.state !== newOption.state;
+
+        this.option = newOption;
+
+        if (isStateChanged) {
+            switch (newOption.state) {
+                case 'WaitDriver':
+                    this.confirmingDriver();
+                    break;
+                case 'TimerStarted':
+                    this.syncTimer();
+                default:
+                    break;
             }
         }
     };
 
     registerHost = async () => {
         this.hostService = await this.liveshare?.shareService(this.SERVICE_NAME);
-
-        this.hostService?.onNotify(Command.cmdTurnChange, this.onCmdTurnChange);
-        this.hostService?.onNotify(Command.cmdStartTimer, this.onCmdStartTimer);
+        this.hostService?.onNotify('doConfirmDriver', this.doConfirmDriver);
 
         if (this.me) {
-            this.members.push(this.me);
+            this.option.members.push(this.me);
         }
     };
 
     registerGuest = async () => {
         this.guestService = await this.liveshare?.getSharedService(this.SERVICE_NAME);
         if (this.guestService?.isServiceAvailable) {
-            this.guestService?.onNotify(Command.cmdStartTimer, this.onCmdStartTimer);
-            this.guestService?.onNotify(Command.cmdTurnChange, this.onCmdTurnChange);
+            this.guestService?.onNotify('sync', this.onSync);
         } else {
             // たぶんホストに拡張が入っていない場合
             console.log('Guest service is not available');
@@ -270,6 +287,14 @@ export class Mobster {
     resetSession = () => {
         this.hostService = undefined;
         this.guestService = undefined;
-        this.members = [];
+        this.option.members = [];
+    };
+
+    notify = (cmd: string, args: any) => {
+        if (this.hostService) {
+            this.hostService.notify(cmd, args);
+        } else if (this.guestService) {
+            this.guestService.notify(cmd, args);
+        }
     };
 }

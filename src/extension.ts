@@ -19,10 +19,10 @@ export function activate(context: vscode.ExtensionContext) {
 	let disposable = vscode.commands.registerCommand('vsls-mobster.openMobStar', () => {
 		// The code you place here will be executed every time your command is executed
 		// Display a message box to the user
-		mobster.askStart();
+		mobster.doAskStart();
 	});
 
-	mobster.activate();
+	mobster.doActivate();
 	context.subscriptions.push(disposable);
 }
 
